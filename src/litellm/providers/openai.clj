@@ -12,14 +12,23 @@
 ;; ============================================================================
 
 (defn transform-messages
-  "Transform messages to OpenAI format"
+  "Transform messages to OpenAI format.
+   Handles all message roles including assistant messages with tool calls
+   and tool result messages."
   [messages]
   (map (fn [msg]
          (let [base {:role (name (:role msg))
                     :content (:content msg)}]
            (cond-> base
              (:name msg) (assoc :name (:name msg))
-             (:tool-call-id msg) (assoc :tool_call_id (:tool-call-id msg)))))
+             (:tool-call-id msg) (assoc :tool_call_id (:tool-call-id msg))
+             (:tool-calls msg) (assoc :tool_calls
+                                      (mapv (fn [tc]
+                                              {:id (:id tc)
+                                               :type (or (:type tc) "function")
+                                               :function {:name (get-in tc [:function :name])
+                                                          :arguments (get-in tc [:function :arguments])}})
+                                            (:tool-calls msg))))))
        messages))
 
 (defn transform-tools
