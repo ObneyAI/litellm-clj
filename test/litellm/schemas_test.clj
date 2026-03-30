@@ -173,3 +173,24 @@
             clojure.lang.ExceptionInfo
             #"Invalid embedding response"
             (schemas/validate-embedding-response! response))))))
+
+;; ============================================================================
+;; Multimodal Content Tests
+;; ============================================================================
+
+(deftest test-valid-request-with-multimodal-content
+  (testing "Valid request with vector content (multimodal)"
+    (let [request {:model "anthropic.claude-sonnet-4-20250514"
+                   :messages [{:role :user
+                               :content [{:type "text" :text "Describe this image"}
+                                         {:type "image_url"
+                                          :image_url {:url "data:image/png;base64,iVBOR..."}}]}]}]
+      (is (true? (schemas/valid-request? request)))
+      (is (nil? (schemas/explain-request request)))))
+
+  (testing "Valid request with string content still works"
+    (let [request {:model "gpt-4"
+                   :messages [{:role :user
+                               :content "Hello world"}]}]
+      (is (true? (schemas/valid-request? request)))
+      (is (nil? (schemas/explain-request request))))))

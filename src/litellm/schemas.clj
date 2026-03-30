@@ -14,7 +14,7 @@
 (def Message
   [:map
    [:role Role]
-   [:content {:optional true} :string]  ; Allow nil for assistant messages with tool-calls
+   [:content {:optional true} [:or :string [:vector :any]]]  ; String or multimodal content parts
    [:name {:optional true} :string]
    [:tool-call-id {:optional true} :string]
    [:reasoning-content {:optional true} :string]  ; Reasoning/thinking content from models

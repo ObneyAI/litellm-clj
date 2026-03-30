@@ -56,6 +56,23 @@
 ;; Message Transformations
 ;; ============================================================================
 
+(defn- parse-data-uri
+  "Parse a data URI, stripping the prefix and extracting format.
+   Returns {:format \"png\" :bytes ByteBuffer} with decoded binary."
+  [uri]
+  (let [[media-type b64] (if-let [[_ mt b] (re-matches #"data:([^;]+);base64,(.*)" uri)]
+                           [mt b]
+                           ["image/png" uri])
+        format (case media-type
+                 "image/png" "png"
+                 "image/jpeg" "jpeg"
+                 "image/gif" "gif"
+                 "image/webp" "webp"
+                 "png")
+        decoded (.decode (java.util.Base64/getDecoder) ^String b64)]
+    {:format format
+     :bytes (java.nio.ByteBuffer/wrap decoded)}))
+
 (defn transform-content
   "Transform content to Bedrock format (array of content blocks)."
   [content]
@@ -63,14 +80,16 @@
     (string? content)
     [{:text content}]
 
-    (vector? content)
+    (sequential? content)
     (mapv (fn [block]
             (cond
               (string? block) {:text block}
               (map? block) (case (:type block)
                              "text" {:text (:text block)}
-                             "image_url" {:image {:format (or (:format block) "png")
-                                                  :source {:bytes (:url (:image_url block))}}}
+                             "image_url" (let [{:keys [format bytes]}
+                                               (parse-data-uri (:url (:image_url block)))]
+                                           {:image {:format format
+                                                    :source {:bytes bytes}}})
                              block)
               :else block))
           content)
