@@ -150,6 +150,11 @@
     
     ;; Add function calling if present
     (cond-> transformed
+      ;; For streaming requests, ask the API to send a final chunk with usage
+      ;; (empty choices). Merge with any caller-provided stream options.
+      (:stream request) (assoc :stream_options (merge {:include_usage true}
+                                                      (:stream_options request)
+                                                      (:stream-options request)))
       (:tools request) (assoc :tools (transform-tools (:tools request)))
       (:tool-choice request) (assoc :tool_choice (transform-tool-choice (:tool-choice request))))))
 
@@ -262,15 +267,18 @@
   [provider-name chunk]
   (let [choice (first (:choices chunk))
         delta (:delta choice)]
-    {:id (:id chunk)
-     :object (:object chunk)
-     :created (:created chunk)
-     :model (:model chunk)
-     :choices [{:index (:index choice)
-               :delta {:role (keyword (:role delta))
-                      :content (:content delta)}
-               :finish-reason (when (:finish_reason choice)
-                               (keyword (:finish_reason choice)))}]}))
+    (cond-> {:id (:id chunk)
+             :object (:object chunk)
+             :created (:created chunk)
+             :model (:model chunk)
+             :choices [{:index (:index choice)
+                       :delta {:role (keyword (:role delta))
+                              :content (:content delta)}
+                       :finish-reason (when (:finish_reason choice)
+                                       (keyword (:finish_reason choice)))}]}
+      ;; Preserve usage on chunks that carry it (final chunk when
+      ;; stream_options.include_usage is set).
+      (:usage chunk) (assoc :usage (transform-usage (:usage chunk))))))
 
 (defn make-streaming-request-impl
   "OpenRouter-specific make-streaming-request implementation"

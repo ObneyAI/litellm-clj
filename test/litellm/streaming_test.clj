@@ -29,6 +29,25 @@
     (let [chunk {:type :error}]
       (is (nil? (streaming/extract-content chunk))))))
 
+(deftest test-extract-usage
+  (testing "Extract usage from a usage-bearing chunk"
+    (let [chunk {:choices []
+                 :usage {:prompt-tokens 10
+                         :completion-tokens 20
+                         :total-tokens 30}}]
+      (is (= {:prompt-tokens 10
+              :completion-tokens 20
+              :total-tokens 30}
+             (streaming/extract-usage chunk)))))
+
+  (testing "Extract nil from chunk without usage"
+    (let [chunk {:choices [{:delta {:content "Hello"}}]}]
+      (is (nil? (streaming/extract-usage chunk)))))
+
+  (testing "Extract nil from error chunk"
+    (let [chunk (streaming/stream-error "openai" "Test error")]
+      (is (nil? (streaming/extract-usage chunk))))))
+
 (deftest test-collect-stream
   (testing "Collect chunks from stream"
     (let [test-ch (chan)]

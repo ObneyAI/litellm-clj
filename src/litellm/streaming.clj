@@ -67,6 +67,20 @@
   [chunk]
   (get-in chunk [:choices 0 :finish-reason]))
 
+(defn extract-usage
+  "Extract usage metadata from a streaming chunk.
+
+  Returns the chunk's :usage map in the standard kebab-case shape
+  ({:prompt-tokens N :completion-tokens N :total-tokens N}), or nil
+  if the chunk carries no usage or is an error chunk.
+
+  Usage-bearing chunks appear when streaming with providers that report
+  usage (e.g. OpenAI-compatible APIs with stream_options.include_usage,
+  or Anthropic message_start/message_delta events)."
+  [chunk]
+  (when-not (is-error-chunk? chunk)
+    (:usage chunk)))
+
 ;; ============================================================================
 ;; Stream Accumulation
 ;; ============================================================================

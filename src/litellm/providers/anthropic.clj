@@ -331,6 +331,34 @@
   [provider-name chunk]
   (let [event-type (:type chunk)]
     (case event-type
+      ;; message_start carries the message metadata and input-token usage
+      ;; (message.usage.input_tokens). Emit a chunk with :usage so usage
+      ;; reaches streaming consumers instead of being dropped.
+      "message_start" (let [message (:message chunk)]
+                        (cond-> {:id (:id message)
+                                 :object "chat.completion.chunk"
+                                 :created (quot (System/currentTimeMillis) 1000)
+                                 :model (:model message)
+                                 :choices [{:index 0
+                                           :delta {:role :assistant}
+                                           :finish-reason nil}]}
+                          (:usage message) (assoc :usage (transform-usage (:usage message)))))
+      ;; message_delta carries cumulative output-token usage and the
+      ;; stop_reason. Emit a chunk with :usage and :finish-reason.
+      "message_delta" (let [stop-reason (get-in chunk [:delta :stop_reason])]
+                        (cond-> {:id (:message_id chunk)
+                                 :object "chat.completion.chunk"
+                                 :created (quot (System/currentTimeMillis) 1000)
+                                 :model (:model chunk)
+                                 :choices [{:index 0
+                                           :delta {}
+                                           :finish-reason (when stop-reason
+                                                            (case stop-reason
+                                                              "end_turn" :stop
+                                                              "tool_use" :tool_calls
+                                                              "max_tokens" :length
+                                                              :stop))}]}
+                          (:usage chunk) (assoc :usage (transform-usage (:usage chunk)))))
       "content_block_start" (cond
                               ;; Tool use start
                               (= "tool_use" (get-in chunk [:content_block :type]))
