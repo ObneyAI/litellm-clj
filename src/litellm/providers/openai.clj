@@ -178,6 +178,11 @@
       (:presence-penalty request) (assoc :presence_penalty (:presence-penalty request))
       (:stop request) (assoc :stop (:stop request))
       (contains? request :stream) (assoc :stream (:stream request))
+      ;; For streaming requests, ask the API to send a final chunk with usage
+      ;; (empty choices). Merge with any caller-provided stream options.
+      (:stream request) (assoc :stream_options (merge {:include_usage true}
+                                                      (:stream_options request)
+                                                      (:stream-options request)))
       (:tools request) (assoc :tools (transform-tools (:tools request)))
       (:tool-choice request) (assoc :tool_choice (transform-tool-choice (:tool-choice request)))
       (:functions request) (assoc :functions (transform-functions (:functions request)))
@@ -265,16 +270,19 @@
   [provider-name chunk]
   (let [choice (first (:choices chunk))
         delta (:delta choice)]
-    {:id (:id chunk)
-     :object (:object chunk)
-     :created (:created chunk)
-     :model (:model chunk)
-     :choices [{:index (:index choice)
-               :delta (cond-> {:role (keyword (:role delta))
-                              :content (:content delta)}
-                        (:reasoning_content delta) (assoc :reasoning-content (:reasoning_content delta)))
-               :finish-reason (when (:finish_reason choice)
-                               (keyword (:finish_reason choice)))}]}))
+    (cond-> {:id (:id chunk)
+             :object (:object chunk)
+             :created (:created chunk)
+             :model (:model chunk)
+             :choices [{:index (:index choice)
+                       :delta (cond-> {:role (keyword (:role delta))
+                                      :content (:content delta)}
+                                (:reasoning_content delta) (assoc :reasoning-content (:reasoning_content delta)))
+                       :finish-reason (when (:finish_reason choice)
+                                       (keyword (:finish_reason choice)))}]}
+      ;; Preserve usage on chunks that carry it (final chunk when
+      ;; stream_options.include_usage is set).
+      (:usage chunk) (assoc :usage (transform-usage (:usage chunk))))))
 
 (defn make-streaming-request-impl
   "OpenAI-specific make-streaming-request implementation"

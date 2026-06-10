@@ -244,6 +244,83 @@
       (is (= 1 (count (get-in result [:message :thinking-blocks]))))
       (is (= "thinking" (get-in result [:message :thinking-blocks 0 :type]))))))
 
+(deftest test-transform-streaming-chunk-message-start
+  (testing "Transform message_start event with usage"
+    (let [chunk {:type "message_start"
+                :message {:id "msg_123"
+                         :type "message"
+                         :role "assistant"
+                         :model "claude-3-sonnet-20240229"
+                         :content []
+                         :stop_reason nil
+                         :usage {:input_tokens 25
+                                 :output_tokens 1}}}
+          result (anthropic/transform-streaming-chunk-impl :anthropic chunk)]
+
+      (is (some? result))
+      (is (= "msg_123" (:id result)))
+      (is (= "chat.completion.chunk" (:object result)))
+      (is (= "claude-3-sonnet-20240229" (:model result)))
+      (is (= :assistant (get-in result [:choices 0 :delta :role])))
+      (is (nil? (get-in result [:choices 0 :delta :content])))
+      (is (nil? (get-in result [:choices 0 :finish-reason])))
+      (is (= {:prompt-tokens 25
+              :completion-tokens 1
+              :total-tokens 26}
+             (:usage result)))))
+
+  (testing "Transform message_start event without usage"
+    (let [chunk {:type "message_start"
+                :message {:id "msg_123"
+                         :role "assistant"
+                         :model "claude-3-sonnet-20240229"}}
+          result (anthropic/transform-streaming-chunk-impl :anthropic chunk)]
+
+      (is (some? result))
+      (is (= "msg_123" (:id result)))
+      (is (not (contains? result :usage))))))
+
+(deftest test-transform-streaming-chunk-message-delta
+  (testing "Transform message_delta event with usage and stop_reason"
+    (let [chunk {:type "message_delta"
+                :delta {:stop_reason "end_turn"
+                        :stop_sequence nil}
+                :usage {:output_tokens 15}}
+          result (anthropic/transform-streaming-chunk-impl :anthropic chunk)]
+
+      (is (some? result))
+      (is (= "chat.completion.chunk" (:object result)))
+      (is (= :stop (get-in result [:choices 0 :finish-reason])))
+      (is (= {} (get-in result [:choices 0 :delta])))
+      (is (= 15 (get-in result [:usage :completion-tokens])))
+      (is (= 15 (get-in result [:usage :total-tokens])))))
+
+  (testing "Transform message_delta event with tool_use stop_reason"
+    (let [chunk {:type "message_delta"
+                :delta {:stop_reason "tool_use"}
+                :usage {:output_tokens 30}}
+          result (anthropic/transform-streaming-chunk-impl :anthropic chunk)]
+
+      (is (= :tool_calls (get-in result [:choices 0 :finish-reason])))
+      (is (= 30 (get-in result [:usage :completion-tokens])))))
+
+  (testing "Transform message_delta event with max_tokens stop_reason"
+    (let [chunk {:type "message_delta"
+                :delta {:stop_reason "max_tokens"}
+                :usage {:output_tokens 1024}}
+          result (anthropic/transform-streaming-chunk-impl :anthropic chunk)]
+
+      (is (= :length (get-in result [:choices 0 :finish-reason])))))
+
+  (testing "Transform message_delta event without stop_reason has nil finish-reason"
+    (let [chunk {:type "message_delta"
+                :delta {}
+                :usage {:output_tokens 5}}
+          result (anthropic/transform-streaming-chunk-impl :anthropic chunk)]
+
+      (is (nil? (get-in result [:choices 0 :finish-reason])))
+      (is (= 5 (get-in result [:usage :completion-tokens]))))))
+
 (deftest test-transform-streaming-chunk-with-tool-use
   (testing "Transform streaming chunk with tool use start"
     (let [chunk {:type "content_block_start"

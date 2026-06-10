@@ -90,6 +90,74 @@
       (is (= 100 (:max_completion_tokens transformed)))
       (is (= 1 (count (:messages transformed)))))))
 
+(deftest test-transform-request-stream-options
+  (testing "Streaming request injects stream_options with include_usage"
+    (let [request {:model "gpt-4"
+                  :messages [{:role :user :content "Hello"}]
+                  :stream true}
+          transformed (openai/transform-request-impl :openai request {})]
+      (is (true? (:stream transformed)))
+      (is (= {:include_usage true} (:stream_options transformed)))))
+
+  (testing "Streaming request merges caller-provided stream_options"
+    (let [request {:model "gpt-4"
+                  :messages [{:role :user :content "Hello"}]
+                  :stream true
+                  :stream_options {:include_obfuscation true}}
+          transformed (openai/transform-request-impl :openai request {})]
+      (is (= {:include_usage true
+              :include_obfuscation true}
+             (:stream_options transformed)))))
+
+  (testing "Caller-provided stream_options values are not clobbered"
+    (let [request {:model "gpt-4"
+                  :messages [{:role :user :content "Hello"}]
+                  :stream true
+                  :stream_options {:include_usage false}}
+          transformed (openai/transform-request-impl :openai request {})]
+      (is (= {:include_usage false} (:stream_options transformed)))))
+
+  (testing "Non-streaming request has no stream_options"
+    (let [request {:model "gpt-4"
+                  :messages [{:role :user :content "Hello"}]}
+          transformed (openai/transform-request-impl :openai request {})]
+      (is (not (contains? transformed :stream_options)))))
+
+  (testing "Explicit stream false has no stream_options"
+    (let [request {:model "gpt-4"
+                  :messages [{:role :user :content "Hello"}]
+                  :stream false}
+          transformed (openai/transform-request-impl :openai request {})]
+      (is (false? (:stream transformed)))
+      (is (not (contains? transformed :stream_options))))))
+
+(deftest test-transform-streaming-chunk-usage
+  (testing "Chunk with usage preserves usage in standard shape"
+    (let [chunk {:id "chatcmpl-123"
+                :object "chat.completion.chunk"
+                :created 1700000000
+                :model "gpt-4"
+                :choices []
+                :usage {:prompt_tokens 10
+                        :completion_tokens 20
+                        :total_tokens 30}}
+          transformed (openai/transform-streaming-chunk-impl :openai chunk)]
+      (is (= {:prompt-tokens 10
+              :completion-tokens 20
+              :total-tokens 30}
+             (:usage transformed)))))
+
+  (testing "Chunk without usage has no usage key"
+    (let [chunk {:id "chatcmpl-123"
+                :object "chat.completion.chunk"
+                :created 1700000000
+                :model "gpt-4"
+                :choices [{:index 0
+                          :delta {:role "assistant" :content "Hello"}}]}
+          transformed (openai/transform-streaming-chunk-impl :openai chunk)]
+      (is (not (contains? transformed :usage)))
+      (is (= "Hello" (get-in transformed [:choices 0 :delta :content]))))))
+
 (deftest test-supports-streaming
   (testing "OpenAI supports streaming"
     (is (true? (openai/supports-streaming-impl :openai)))))
