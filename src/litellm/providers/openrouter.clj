@@ -161,7 +161,8 @@
 (defn make-request-impl
   "OpenRouter-specific make-request implementation"
   [provider-name transformed-request thread-pool telemetry config]
-  (let [url (str (:api-base config "https://openrouter.ai/api/v1") "/chat/completions")]
+  (let [url (str (:api-base config "https://openrouter.ai/api/v1") "/chat/completions")
+        timeout-ms (:timeout config 30000)]
     (errors/wrap-http-errors
       "openrouter"
       #(let [start-time (System/currentTimeMillis)
@@ -172,16 +173,25 @@
                                                   "Content-Type" "application/json"
                                                   "User-Agent" "litellm-clj/1.0.0"}
                                         :body (json/encode transformed-request)
-                                        :timeout (:timeout config 30000)
+                                        :timeout timeout-ms
                                         :async? true
                                         :as :json}
                                        (when thread-pool
                                          {:executor thread-pool})))
+             timed-out (Object.)
+             resolved-response (deref response timeout-ms timed-out)
              duration (- (System/currentTimeMillis) start-time)]
+
+         (when (identical? timed-out resolved-response)
+           (future-cancel response)
+           (throw (errors/timeout-error
+                   "openrouter"
+                   (str "OpenRouter request timed out after " timeout-ms " ms")
+                   :timeout-ms timeout-ms)))
          
          ;; Handle errors if response has error status
-         (when (>= (:status @response) 400)
-           (handle-error-response :openrouter @response))
+         (when (>= (:status resolved-response) 400)
+           (handle-error-response :openrouter resolved-response))
          
          response))))
 

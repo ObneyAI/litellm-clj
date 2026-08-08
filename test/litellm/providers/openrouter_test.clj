@@ -1,5 +1,6 @@
 (ns litellm.providers.openrouter-test
   (:require [clojure.test :refer [deftest testing is]]
+            [hato.client :as http]
             [litellm.providers.openrouter :as openrouter]))
 
 (def ^:private response-fixture
@@ -37,6 +38,27 @@
     (is (vector? (openrouter/transform-tool-calls
                   [{:id "c1" :type "function"
                     :function {:name "f" :arguments "{}"}}])))))
+
+(deftest test-make-request-times-out-and-cancels-stalled-response
+  (testing "A response future that never completes fails within the configured timeout"
+    (let [response (future (Thread/sleep 60000))
+          started-at (System/currentTimeMillis)
+          error (with-redefs [http/post (fn [_url _options] response)]
+                  (try
+                    (openrouter/make-request-impl
+                     :openrouter
+                     {:model "anthropic/claude-sonnet-5" :messages []}
+                     nil
+                     nil
+                     {:api-key "test" :timeout 10})
+                    nil
+                    (catch clojure.lang.ExceptionInfo e
+                      e)))]
+      (is (= :litellm/timeout (:type (ex-data error))))
+      (is (= "openrouter" (:provider (ex-data error))))
+      (is (= 10 (get-in (ex-data error) [:context :timeout-ms])))
+      (is (future-cancelled? response))
+      (is (< (- (System/currentTimeMillis) started-at) 1000)))))
 
 ;; ============================================================================
 ;; Streaming Usage Tests
