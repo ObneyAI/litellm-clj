@@ -2,6 +2,7 @@
   "OpenRouter provider implementation for LiteLLM"
   (:require [litellm.streaming :as streaming]
             [litellm.errors :as errors]
+            [litellm.providers.openai-compatible :as compat]
             [hato.client :as http]
             [cheshire.core :as json]
             [clojure.tools.logging :as log]
@@ -134,10 +135,61 @@
 ;; OpenRouter Provider Implementation Functions
 ;; ============================================================================
 
+(def ^:private supported-thinking-keys
+  #{:type :budget-tokens})
+
+(defn- invalid-thinking!
+  [message thinking errors]
+  (throw (errors/invalid-request
+          message
+          :request {:thinking thinking}
+          :errors errors)))
+
+(defn- transform-thinking
+  [thinking]
+  (let [unsupported (seq (remove supported-thinking-keys (keys thinking)))
+        type (some-> (:type thinking) compat/kw->api-string)
+        budget-tokens (:budget-tokens thinking)]
+    (when unsupported
+      (invalid-thinking!
+       "OpenRouter does not support these provider-neutral thinking fields"
+       thinking
+       {:unsupported-keys (vec unsupported)
+        :supported-keys (vec supported-thinking-keys)}))
+    (when (and (= "disabled" type) budget-tokens)
+      (invalid-thinking!
+       "Disabled OpenRouter thinking cannot include a token budget"
+       thinking
+       {:incompatible-keys [:type :budget-tokens]}))
+    (cond-> {:enabled (= "enabled" type)}
+      budget-tokens (assoc :max_tokens budget-tokens))))
+
+(defn- transform-reasoning
+  [request]
+  ;; The public contract gives explicit :thinking precedence over the simpler
+  ;; :reasoning-effort control.
+  (cond
+    (contains? request :thinking) (transform-thinking (:thinking request))
+    (contains? request :reasoning-effort)
+    {:effort (compat/kw->api-string (:reasoning-effort request))}))
+
+(defn- merge-openrouter-extra-body
+  [transformed reasoning extra-body]
+  (when (and reasoning (contains? extra-body :reasoning))
+    (throw (errors/invalid-request
+            "extra-body cannot override normalized OpenRouter reasoning controls"
+            :request extra-body
+            :errors {:protected-keys [:reasoning]})))
+  (compat/merge-extra-body
+   transformed
+   (cond-> {} reasoning (assoc :reasoning reasoning))
+   extra-body))
+
 (defn transform-request-impl
   "OpenRouter-specific transform-request implementation"
   [provider-name request config]
   (let [model (:model request)
+        reasoning (transform-reasoning request)
         transformed {:model model
                     :messages (transform-messages (:messages request))
                     :max_tokens (:max-tokens request)
@@ -149,14 +201,17 @@
                     :stream (:stream request false)}]
     
     ;; Add function calling if present
-    (cond-> transformed
-      ;; For streaming requests, ask the API to send a final chunk with usage
-      ;; (empty choices). Merge with any caller-provided stream options.
-      (:stream request) (assoc :stream_options (merge {:include_usage true}
-                                                      (:stream_options request)
-                                                      (:stream-options request)))
-      (:tools request) (assoc :tools (transform-tools (:tools request)))
-      (:tool-choice request) (assoc :tool_choice (transform-tool-choice (:tool-choice request))))))
+    (merge-openrouter-extra-body
+     (cond-> transformed
+       ;; For streaming requests, ask the API to send a final chunk with usage
+       ;; (empty choices). Merge with any caller-provided stream options.
+       (:stream request) (assoc :stream_options (merge {:include_usage true}
+                                                       (:stream_options request)
+                                                       (:stream-options request)))
+       (:tools request) (assoc :tools (transform-tools (:tools request)))
+       (:tool-choice request) (assoc :tool_choice (transform-tool-choice (:tool-choice request))))
+     reasoning
+     (:extra-body request))))
 
 (defn make-request-impl
   "OpenRouter-specific make-request implementation"

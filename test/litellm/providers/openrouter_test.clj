@@ -1,6 +1,7 @@
 (ns litellm.providers.openrouter-test
   (:require [clojure.test :refer [deftest testing is]]
             [hato.client :as http]
+            [litellm.errors :as errors]
             [litellm.providers.openrouter :as openrouter]))
 
 (def ^:private response-fixture
@@ -38,6 +39,93 @@
     (is (vector? (openrouter/transform-tool-calls
                   [{:id "c1" :type "function"
                     :function {:name "f" :arguments "{}"}}])))))
+
+(deftest test-transform-request-reasoning-controls
+  (testing "reasoning effort becomes OpenRouter's canonical reasoning object"
+    (let [transformed (openrouter/transform-request-impl
+                       :openrouter
+                       {:model "google/gemini-3.5-flash"
+                        :messages [{:role :user :content "Answer briefly"}]
+                        :reasoning-effort :none
+                        :max-tokens 512}
+                       {})]
+      (is (= 512 (:max_tokens transformed)))
+      (is (= {:effort "none"} (:reasoning transformed)))))
+
+  (testing "explicit thinking takes precedence and maps supported controls"
+    (let [transformed (openrouter/transform-request-impl
+                       :openrouter
+                       {:model "anthropic/claude-sonnet-4"
+                        :messages [{:role :user :content "Think within budget"}]
+                        :reasoning-effort :high
+                        :thinking {:type :enabled :budget-tokens 2048}}
+                       {})]
+      (is (= {:enabled true :max_tokens 2048}
+             (:reasoning transformed)))))
+
+  (testing "disabled thinking maps to an explicit OpenRouter disable control"
+    (let [transformed (openrouter/transform-request-impl
+                       :openrouter
+                       {:model "openai/gpt-5"
+                        :messages [{:role :user :content "Answer"}]
+                        :thinking {:type :disabled}}
+                       {})]
+      (is (= {:enabled false} (:reasoning transformed)))))
+
+  (testing "unsupported provider-neutral thinking fields fail explicitly"
+    (let [error (try
+                  (openrouter/transform-request-impl
+                   :openrouter
+                   {:model "moonshotai/kimi-k2"
+                    :messages [{:role :user :content "Answer"}]
+                    :thinking {:type :enabled :keep :all}}
+                   {})
+                  nil
+                  (catch clojure.lang.ExceptionInfo e
+                    e))]
+      (is (some? error))
+      (is (errors/error-type? error :litellm/invalid-request))))
+
+  (testing "extra-body cannot ambiguously replace normalized reasoning"
+    (let [error (try
+                  (openrouter/transform-request-impl
+                   :openrouter
+                   {:model "openai/gpt-5"
+                    :messages [{:role :user :content "Answer"}]
+                    :reasoning-effort :low
+                    :extra-body {:reasoning {:effort "high"}}}
+                   {})
+                  nil
+                  (catch clojure.lang.ExceptionInfo e
+                    e))]
+      (is (some? error))
+      (is (errors/error-type? error :litellm/invalid-request)))))
+
+(deftest test-transform-request-extra-body
+  (testing "provider-specific extra body fields reach OpenRouter"
+    (let [transformed (openrouter/transform-request-impl
+                       :openrouter
+                       {:model "openai/gpt-5"
+                        :messages [{:role :user :content "Answer"}]
+                        :extra-body {:provider {:sort "throughput"}
+                                     :reasoning {:exclude true}}}
+                       {})]
+      (is (= {:sort "throughput"} (:provider transformed)))
+      (is (= {:exclude true} (:reasoning transformed)))))
+
+  (testing "extra-body cannot override protected fields"
+    (let [error (try
+                  (openrouter/transform-request-impl
+                   :openrouter
+                   {:model "openai/gpt-5"
+                    :messages [{:role :user :content "Answer"}]
+                    :extra-body {:model "override"}}
+                   {})
+                  nil
+                  (catch clojure.lang.ExceptionInfo e
+                    e))]
+      (is (some? error))
+      (is (errors/error-type? error :litellm/invalid-request)))))
 
 (deftest test-make-request-times-out-and-cancels-stalled-response
   (testing "A response future that never completes fails within the configured timeout"

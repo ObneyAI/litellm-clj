@@ -20,6 +20,7 @@ LiteLLM Clojure provides support for sending and receiving reasoning tokens from
 | DeepSeek     | ✅ Yes           | deepseek-v4-flash, deepseek-v4-pro |
 | Kimi/Moonshot| ✅ Yes           | kimi-k2.7-code, kimi-k2.6, kimi-k2.5 |
 | Z.AI GLM     | ✅ Yes           | glm-5.2, glm-5.1, glm-4.7, glm-4.5 |
+| OpenRouter   | ✅ Request controls | Models advertising OpenRouter reasoning support |
 
 **Note**: Provider-native reasoning fields differ. `litellm-clj` normalizes common response extraction to `:reasoning-content` and preserves provider-specific request controls.
 
@@ -224,6 +225,13 @@ Reasoning content can be streamed for progressive rendering:
 - **DeepSeek**: `:reasoning-effort :low` and `:medium` map to provider `high`; `:xhigh` and `:max` map to provider `max`; `:minimal` and `:none` disable thinking when no explicit `:thinking` is supplied.
 - **Kimi/Moonshot**: `:max-tokens` is sent as `max_completion_tokens`. K2.7 Code has thinking always on; disabling it raises `:litellm/invalid-request` before HTTP.
 - **Z.AI GLM**: supports `:reasoning-effort` values through `:max`, plus `:thinking {:clear-thinking false}` or top-level `:clear-thinking false` for preserved thinking. `:tool-choice` currently supports only `:auto`.
+- **OpenRouter**: `:reasoning-effort` maps to `reasoning.effort`.
+  `:thinking {:type :enabled|:disabled :budget-tokens N}` maps to OpenRouter's
+  canonical `reasoning` object and takes precedence over `:reasoning-effort`.
+  OpenRouter does not support the provider-neutral `:keep` or `:clear-thinking`
+  fields, so those values fail with `:litellm/invalid-request`. Provider-native
+  reasoning options may be supplied through `:extra-body` when no normalized
+  reasoning control is present.
 
 ## Router API Support
 
@@ -282,7 +290,9 @@ Reasoning works with the Router API:
 
 ## Future Provider Support
 
-Reasoning support is now available for Anthropic, OpenAI, DeepSeek, Kimi/Moonshot, and Z.AI GLM. Additional providers such as XAI can be added behind the same `:reasoning-content` response shape as provider APIs mature.
+Reasoning support is now available for Anthropic, OpenAI, DeepSeek,
+Kimi/Moonshot, Z.AI GLM, and OpenRouter. Additional providers can be added
+behind the same provider-neutral request controls as their APIs mature.
 
 ## API Reference
 
