@@ -212,3 +212,75 @@
           transformed (openrouter/transform-streaming-chunk-impl :openrouter chunk)]
       (is (not (contains? transformed :usage)))
       (is (= "Hello" (get-in transformed [:choices 0 :delta :content]))))))
+
+;; ============================================================================
+;; Usage cost and native finish detail
+;; ============================================================================
+
+(defn- usage-of [usage]
+  (:usage (openrouter/transform-response-impl
+           :openrouter
+           (assoc-in response-fixture [:body :usage] usage))))
+
+(deftest test-usage-preserves-reported-cost
+  (testing "A numeric cost is kept exactly as :cost with all token counts"
+    (is (= {:prompt-tokens 1 :completion-tokens 2 :total-tokens 3 :cost 0.000123456789}
+           (usage-of {:prompt_tokens 1 :completion_tokens 2 :total_tokens 3
+                      :cost 0.000123456789})))))
+
+(deftest test-usage-cost-absent-zero-and-invalid
+  (testing "Absent cost leaves no :cost key (unknown, not zero)"
+    (is (= {:prompt-tokens 1 :completion-tokens 2 :total-tokens 3}
+           (usage-of {:prompt_tokens 1 :completion_tokens 2 :total_tokens 3}))))
+  (testing "Explicit zero cost is preserved as 0"
+    (is (= 0 (:cost (usage-of {:prompt_tokens 1 :completion_tokens 2
+                               :total_tokens 3 :cost 0})))))
+  (testing "Non-numeric or non-finite cost is dropped; tokens unaffected"
+    (doseq [bad ["0.01" nil true {:a 1} [1] Double/NaN
+                 Double/POSITIVE_INFINITY Double/NEGATIVE_INFINITY]]
+      (let [u (usage-of {:prompt_tokens 1 :completion_tokens 2
+                         :total_tokens 3 :cost bad})]
+        (is (not (contains? u :cost)) (str "cost " (pr-str bad)))
+        (is (= {:prompt-tokens 1 :completion-tokens 2 :total-tokens 3} u))))))
+
+(deftest test-usage-cost-details
+  (testing "cost_details is preserved verbatim as :cost-details"
+    (let [details {:upstream_inference_cost 0.5
+                   :upstream_inference_prompt_cost 0.2}]
+      (is (= details
+             (:cost-details (usage-of {:prompt_tokens 1 :completion_tokens 2
+                                       :total_tokens 3 :cost 0.5
+                                       :cost_details details}))))))
+  (testing "Absent cost_details leaves no :cost-details key"
+    (is (not (contains? (usage-of {:prompt_tokens 1 :completion_tokens 2
+                                   :total_tokens 3 :cost 0.5})
+                        :cost-details)))))
+
+(deftest test-streaming-chunk-preserves-cost
+  (testing "Final chunk carrying usage keeps cost and cost-details"
+    (let [chunk {:id "gen-1" :object "chat.completion.chunk" :created 1
+                 :model "openai/gpt-4" :choices []
+                 :usage {:prompt_tokens 10 :completion_tokens 20
+                         :total_tokens 30 :cost 0.0042
+                         :cost_details {:upstream_inference_cost 0.004}}}
+          usage (:usage (openrouter/transform-streaming-chunk-impl :openrouter chunk))]
+      (is (= 0.0042 (:cost usage)))
+      (is (= {:upstream_inference_cost 0.004} (:cost-details usage)))
+      (is (= 30 (:total-tokens usage))))))
+
+(deftest test-choice-native-finish-reason
+  (testing "native_finish_reason is exposed; finish-reason unchanged"
+    (let [resp (assoc-in response-fixture [:body :choices 0]
+                         {:index 0
+                          :message {:role "assistant" :content nil}
+                          :finish_reason "error"
+                          :native_finish_reason "MALFORMED_FUNCTION_CALL"})
+          choice (get-in (openrouter/transform-response-impl :openrouter resp)
+                         [:choices 0])]
+      (is (= "MALFORMED_FUNCTION_CALL" (:native-finish-reason choice)))
+      (is (= :error (:finish-reason choice)))))
+  (testing "Absent native_finish_reason leaves no key"
+    (let [choice (get-in (openrouter/transform-response-impl :openrouter response-fixture)
+                         [:choices 0])]
+      (is (not (contains? choice :native-finish-reason)))
+      (is (= :tool_calls (:finish-reason choice))))))
