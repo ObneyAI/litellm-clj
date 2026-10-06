@@ -76,19 +76,36 @@
     (:tool_calls message) (assoc :tool-calls (transform-tool-calls (:tool_calls message)))))
 
 (defn transform-choice
-  "Transform OpenRouter choice to standard format (same as OpenAI)"
+  "Transform OpenRouter choice to standard format (same as OpenAI), keeping
+  the provider's :native-finish-reason (e.g. \"MALFORMED_FUNCTION_CALL\") when present."
   [choice]
-  {:index (:index choice)
-   :message (transform-message (:message choice))
-   :finish-reason (keyword (:finish_reason choice))})
+  (cond-> {:index (:index choice)
+           :message (transform-message (:message choice))
+           :finish-reason (keyword (:finish_reason choice))}
+    (some? (:native_finish_reason choice))
+    (assoc :native-finish-reason (:native_finish_reason choice))))
+
+(defn- finite-number?
+  "True for a number that is neither NaN nor infinite."
+  [x]
+  (and (number? x)
+       (not (and (float? x) (or (Double/isNaN (double x))
+                                (Double/isInfinite (double x)))))))
 
 (defn transform-usage
-  "Transform OpenRouter usage to standard format (same as OpenAI)"
+  "Transform OpenRouter usage to standard format (same as OpenAI), preserving
+  the provider-reported `cost` (USD) and `cost_details` when present.
+
+  A missing, non-numeric or non-finite cost yields no :cost key (unknown, not
+  zero); a reported 0 is kept as 0."
   [usage]
   (when usage
-    {:prompt-tokens (:prompt_tokens usage)
-     :completion-tokens (:completion_tokens usage)
-     :total-tokens (:total_tokens usage)}))
+    (let [cost (:cost usage)]
+      (cond-> {:prompt-tokens (:prompt_tokens usage)
+               :completion-tokens (:completion_tokens usage)
+               :total-tokens (:total_tokens usage)}
+        (finite-number? cost) (assoc :cost cost)
+        (some? (:cost_details usage)) (assoc :cost-details (:cost_details usage))))))
 
 ;; ============================================================================
 ;; Error Handling
