@@ -24,13 +24,20 @@
 (def ToolCall
   KeywordAnyMap)
 
+(def ProviderObservationMap
+  "Opaque provider evidence: validate the container without rewriting or stripping
+   vendor-defined keys inside typed reasoning blocks and usage details."
+  [:fn map?])
+
 (def Message
   [:map
    [:role Role]
    [:content {:optional true} MessageContent]
    [:name {:optional true} :string]
    [:tool-call-id {:optional true} :string]
-   [:reasoning-content {:optional true} :string]
+   [:refusal {:optional true} [:maybe :string]]
+   [:reasoning-content {:optional true} [:maybe :string]]
+   [:reasoning-details {:optional true} [:maybe [:vector ProviderObservationMap]]]
    [:tool-calls {:optional true} [:vector ToolCall]]
    [:partial {:optional true} :boolean]
    [:thinking-blocks {:optional true} [:vector :map]]])  ; Thinking blocks (Anthropic-specific)
@@ -154,7 +161,12 @@
   [:map
    [:prompt-tokens PromptTokens]
    [:completion-tokens CompletionTokens]
-   [:total-tokens TotalTokens]])
+   [:total-tokens TotalTokens]
+   [:prompt-tokens-details {:optional true} [:maybe ProviderObservationMap]]
+   [:completion-tokens-details {:optional true} [:maybe ProviderObservationMap]]
+   [:cost-details {:optional true} [:maybe ProviderObservationMap]]
+   [:cost {:optional true} [:maybe number?]]
+   [:is-byok {:optional true} [:maybe :boolean]]])
 
 ;; Choice information
 (def Index :int)
@@ -172,7 +184,7 @@
 (def CompletionResponse
   [:map
    [:id Id]
-   [:object Object]
+   [:object object]
    [:created Created]
    [:model ModelResponse]
    [:choices Choices]

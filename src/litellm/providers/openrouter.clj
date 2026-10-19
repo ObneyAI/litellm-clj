@@ -36,14 +36,7 @@
 (defn transform-tools
   "Transform tools to OpenRouter format (same as OpenAI)"
   [tools]
-  (when tools
-    (map (fn [tool]
-           (let [func (:function tool)]
-             {:type (:tool-type tool "function")
-              :function {:name (or (:function-name func) (:name func))
-                        :description (or (:function-description func) (:description func))
-                        :parameters (or (:function-parameters func) (:parameters func))}}))
-         tools)))
+  (compat/transform-tools tools))
 
 (defn transform-tool-choice
   "Transform tool choice to OpenRouter format (same as OpenAI)"
@@ -69,11 +62,15 @@
          tool-calls)))
 
 (defn transform-message
-  "Transform OpenRouter message to standard format (same as OpenAI)"
+  "Normalize a blocking response message. Preserve provider reasoning presence and
+   typed details verbatim; opaque blocks are observations, not decoded text."
   [message]
   (cond-> {:role (keyword (:role message))
            :content (:content message)}
-    (:tool_calls message) (assoc :tool-calls (transform-tool-calls (:tool_calls message)))))
+    (:tool_calls message) (assoc :tool-calls (transform-tool-calls (:tool_calls message)))
+    (contains? message :refusal) (assoc :refusal (:refusal message))
+    (contains? message :reasoning) (assoc :reasoning-content (:reasoning message))
+    (contains? message :reasoning_details) (assoc :reasoning-details (:reasoning_details message))))
 
 (defn transform-choice
   "Transform OpenRouter choice to standard format (same as OpenAI)"
@@ -86,9 +83,18 @@
   "Transform OpenRouter usage to standard format (same as OpenAI)"
   [usage]
   (when usage
-    {:prompt-tokens (:prompt_tokens usage)
-     :completion-tokens (:completion_tokens usage)
-     :total-tokens (:total_tokens usage)}))
+    (reduce (fn [result [wire normalized]]
+              (if (contains? usage wire)
+                (assoc result normalized (get usage wire))
+                result))
+            {:prompt-tokens (:prompt_tokens usage)
+             :completion-tokens (:completion_tokens usage)
+             :total-tokens (:total_tokens usage)}
+            [[:prompt_tokens_details :prompt-tokens-details]
+             [:completion_tokens_details :completion-tokens-details]
+             [:cost_details :cost-details]
+             [:cost :cost]
+             [:is_byok :is-byok]])))
 
 ;; ============================================================================
 ;; Error Handling
@@ -180,10 +186,24 @@
             "extra-body cannot override normalized OpenRouter reasoning controls"
             :request extra-body
             :errors {:protected-keys [:reasoning]})))
+  (when (and (contains? transformed :response_format)
+             (some #(contains? extra-body %) [:response_format :response-format]))
+    (throw (errors/invalid-request
+            "extra-body cannot override normalized OpenRouter response format"
+            :request extra-body
+            :errors {:protected-keys [:response_format]})))
   (compat/merge-extra-body
    transformed
    (cond-> {} reasoning (assoc :reasoning reasoning))
    extra-body))
+
+(defn- transform-response-format
+  [format]
+  ;; Normalize the option envelope only. Recursively rewriting a JSON Schema
+  ;; would change literal property names (e.g. result-name) and break contracts.
+  (cond-> (dissoc format :json-schema)
+    (contains? format :type) (update :type compat/kw->api-string)
+    (contains? format :json-schema) (assoc :json_schema (:json-schema format))))
 
 (defn transform-request-impl
   "OpenRouter-specific transform-request implementation"
@@ -208,6 +228,7 @@
        (:stream request) (assoc :stream_options (merge {:include_usage true}
                                                        (:stream_options request)
                                                        (:stream-options request)))
+       (contains? request :response-format) (assoc :response_format (transform-response-format (:response-format request)))
        (:tools request) (assoc :tools (transform-tools (:tools request)))
        (:tool-choice request) (assoc :tool_choice (transform-tool-choice (:tool-choice request))))
      reasoning
@@ -328,7 +349,8 @@
                                (keyword (:finish_reason choice)))}]}))
 
 (defn transform-streaming-chunk-impl
-  "OpenRouter-specific transform-streaming-chunk implementation"
+  "OpenRouter streaming normalization. Usage details are preserved when returned.
+   Reasoning deltas and their accumulation are not supported by this path."
   [provider-name chunk]
   (let [choice (first (:choices chunk))
         delta (:delta choice)]
