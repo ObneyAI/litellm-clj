@@ -2,6 +2,7 @@
   "OpenRouter provider implementation for LiteLLM"
   (:require [litellm.streaming :as streaming]
             [litellm.errors :as errors]
+            [litellm.providers.openai-compatible :as compat]
             [hato.client :as http]
             [cheshire.core :as json]
             [clojure.tools.logging :as log]
@@ -13,27 +14,29 @@
 ;; ============================================================================
 
 (defn transform-messages
-  "Transform messages to OpenRouter format (same as OpenAI)"
+  "Transform messages to OpenRouter format (same as OpenAI).
+   Handles all message roles including assistant messages with tool calls
+   and tool result messages."
   [messages]
   (map (fn [msg]
          (let [base {:role (name (:role msg))
                     :content (:content msg)}]
            (cond-> base
              (:name msg) (assoc :name (:name msg))
-             (:tool-call-id msg) (assoc :tool_call_id (:tool-call-id msg)))))
+             (:tool-call-id msg) (assoc :tool_call_id (:tool-call-id msg))
+             (:tool-calls msg) (assoc :tool_calls
+                                      (mapv (fn [tc]
+                                              {:id (:id tc)
+                                               :type (or (:type tc) "function")
+                                               :function {:name (get-in tc [:function :name])
+                                                          :arguments (get-in tc [:function :arguments])}})
+                                            (:tool-calls msg))))))
        messages))
 
 (defn transform-tools
   "Transform tools to OpenRouter format (same as OpenAI)"
   [tools]
-  (when tools
-    (map (fn [tool]
-           (let [func (:function tool)]
-             {:type (:tool-type tool "function")
-              :function {:name (or (:function-name func) (:name func))
-                        :description (or (:function-description func) (:description func))
-                        :parameters (or (:function-parameters func) (:parameters func))}}))
-         tools)))
+  (compat/transform-tools tools))
 
 (defn transform-tool-choice
   "Transform tool choice to OpenRouter format (same as OpenAI)"
@@ -59,11 +62,15 @@
          tool-calls)))
 
 (defn transform-message
-  "Transform OpenRouter message to standard format (same as OpenAI)"
+  "Normalize a blocking response message. Preserve provider reasoning presence and
+   typed details verbatim; opaque blocks are observations, not decoded text."
   [message]
   (cond-> {:role (keyword (:role message))
            :content (:content message)}
-    (:tool_calls message) (assoc :tool-calls (transform-tool-calls (:tool_calls message)))))
+    (:tool_calls message) (assoc :tool-calls (transform-tool-calls (:tool_calls message)))
+    (contains? message :refusal) (assoc :refusal (:refusal message))
+    (contains? message :reasoning) (assoc :reasoning-content (:reasoning message))
+    (contains? message :reasoning_details) (assoc :reasoning-details (:reasoning_details message))))
 
 (defn transform-choice
   "Transform OpenRouter choice to standard format (same as OpenAI)"
@@ -76,9 +83,18 @@
   "Transform OpenRouter usage to standard format (same as OpenAI)"
   [usage]
   (when usage
-    {:prompt-tokens (:prompt_tokens usage)
-     :completion-tokens (:completion_tokens usage)
-     :total-tokens (:total_tokens usage)}))
+    (reduce (fn [result [wire normalized]]
+              (if (contains? usage wire)
+                (assoc result normalized (get usage wire))
+                result))
+            {:prompt-tokens (:prompt_tokens usage)
+             :completion-tokens (:completion_tokens usage)
+             :total-tokens (:total_tokens usage)}
+            [[:prompt_tokens_details :prompt-tokens-details]
+             [:completion_tokens_details :completion-tokens-details]
+             [:cost_details :cost-details]
+             [:cost :cost]
+             [:is_byok :is-byok]])))
 
 ;; ============================================================================
 ;; Error Handling
@@ -125,10 +141,75 @@
 ;; OpenRouter Provider Implementation Functions
 ;; ============================================================================
 
+(def ^:private supported-thinking-keys
+  #{:type :budget-tokens})
+
+(defn- invalid-thinking!
+  [message thinking errors]
+  (throw (errors/invalid-request
+          message
+          :request {:thinking thinking}
+          :errors errors)))
+
+(defn- transform-thinking
+  [thinking]
+  (let [unsupported (seq (remove supported-thinking-keys (keys thinking)))
+        type (some-> (:type thinking) compat/kw->api-string)
+        budget-tokens (:budget-tokens thinking)]
+    (when unsupported
+      (invalid-thinking!
+       "OpenRouter does not support these provider-neutral thinking fields"
+       thinking
+       {:unsupported-keys (vec unsupported)
+        :supported-keys (vec supported-thinking-keys)}))
+    (when (and (= "disabled" type) budget-tokens)
+      (invalid-thinking!
+       "Disabled OpenRouter thinking cannot include a token budget"
+       thinking
+       {:incompatible-keys [:type :budget-tokens]}))
+    (cond-> {:enabled (= "enabled" type)}
+      budget-tokens (assoc :max_tokens budget-tokens))))
+
+(defn- transform-reasoning
+  [request]
+  ;; The public contract gives explicit :thinking precedence over the simpler
+  ;; :reasoning-effort control.
+  (cond
+    (contains? request :thinking) (transform-thinking (:thinking request))
+    (contains? request :reasoning-effort)
+    {:effort (compat/kw->api-string (:reasoning-effort request))}))
+
+(defn- merge-openrouter-extra-body
+  [transformed reasoning extra-body]
+  (when (and reasoning (contains? extra-body :reasoning))
+    (throw (errors/invalid-request
+            "extra-body cannot override normalized OpenRouter reasoning controls"
+            :request extra-body
+            :errors {:protected-keys [:reasoning]})))
+  (when (and (contains? transformed :response_format)
+             (some #(contains? extra-body %) [:response_format :response-format]))
+    (throw (errors/invalid-request
+            "extra-body cannot override normalized OpenRouter response format"
+            :request extra-body
+            :errors {:protected-keys [:response_format]})))
+  (compat/merge-extra-body
+   transformed
+   (cond-> {} reasoning (assoc :reasoning reasoning))
+   extra-body))
+
+(defn- transform-response-format
+  [format]
+  ;; Normalize the option envelope only. Recursively rewriting a JSON Schema
+  ;; would change literal property names (e.g. result-name) and break contracts.
+  (cond-> (dissoc format :json-schema)
+    (contains? format :type) (update :type compat/kw->api-string)
+    (contains? format :json-schema) (assoc :json_schema (:json-schema format))))
+
 (defn transform-request-impl
   "OpenRouter-specific transform-request implementation"
   [provider-name request config]
   (let [model (:model request)
+        reasoning (transform-reasoning request)
         transformed {:model model
                     :messages (transform-messages (:messages request))
                     :max_tokens (:max-tokens request)
@@ -140,14 +221,24 @@
                     :stream (:stream request false)}]
     
     ;; Add function calling if present
-    (cond-> transformed
-      (:tools request) (assoc :tools (transform-tools (:tools request)))
-      (:tool-choice request) (assoc :tool_choice (transform-tool-choice (:tool-choice request))))))
+    (merge-openrouter-extra-body
+     (cond-> transformed
+       ;; For streaming requests, ask the API to send a final chunk with usage
+       ;; (empty choices). Merge with any caller-provided stream options.
+       (:stream request) (assoc :stream_options (merge {:include_usage true}
+                                                       (:stream_options request)
+                                                       (:stream-options request)))
+       (contains? request :response-format) (assoc :response_format (transform-response-format (:response-format request)))
+       (:tools request) (assoc :tools (transform-tools (:tools request)))
+       (:tool-choice request) (assoc :tool_choice (transform-tool-choice (:tool-choice request))))
+     reasoning
+     (:extra-body request))))
 
 (defn make-request-impl
   "OpenRouter-specific make-request implementation"
   [provider-name transformed-request thread-pool telemetry config]
-  (let [url (str (:api-base config "https://openrouter.ai/api/v1") "/chat/completions")]
+  (let [url (str (:api-base config "https://openrouter.ai/api/v1") "/chat/completions")
+        timeout-ms (:timeout config 30000)]
     (errors/wrap-http-errors
       "openrouter"
       #(let [start-time (System/currentTimeMillis)
@@ -158,16 +249,25 @@
                                                   "Content-Type" "application/json"
                                                   "User-Agent" "litellm-clj/1.0.0"}
                                         :body (json/encode transformed-request)
-                                        :timeout (:timeout config 30000)
+                                        :timeout timeout-ms
                                         :async? true
                                         :as :json}
                                        (when thread-pool
                                          {:executor thread-pool})))
+             timed-out (Object.)
+             resolved-response (deref response timeout-ms timed-out)
              duration (- (System/currentTimeMillis) start-time)]
+
+         (when (identical? timed-out resolved-response)
+           (future-cancel response)
+           (throw (errors/timeout-error
+                   "openrouter"
+                   (str "OpenRouter request timed out after " timeout-ms " ms")
+                   :timeout-ms timeout-ms)))
          
          ;; Handle errors if response has error status
-         (when (>= (:status @response) 400)
-           (handle-error-response :openrouter @response))
+         (when (>= (:status resolved-response) 400)
+           (handle-error-response :openrouter resolved-response))
          
          response))))
 
@@ -249,19 +349,23 @@
                                (keyword (:finish_reason choice)))}]}))
 
 (defn transform-streaming-chunk-impl
-  "OpenRouter-specific transform-streaming-chunk implementation"
+  "OpenRouter streaming normalization. Usage details are preserved when returned.
+   Reasoning deltas and their accumulation are not supported by this path."
   [provider-name chunk]
   (let [choice (first (:choices chunk))
         delta (:delta choice)]
-    {:id (:id chunk)
-     :object (:object chunk)
-     :created (:created chunk)
-     :model (:model chunk)
-     :choices [{:index (:index choice)
-               :delta {:role (keyword (:role delta))
-                      :content (:content delta)}
-               :finish-reason (when (:finish_reason choice)
-                               (keyword (:finish_reason choice)))}]}))
+    (cond-> {:id (:id chunk)
+             :object (:object chunk)
+             :created (:created chunk)
+             :model (:model chunk)
+             :choices [{:index (:index choice)
+                       :delta {:role (keyword (:role delta))
+                              :content (:content delta)}
+                       :finish-reason (when (:finish_reason choice)
+                                       (keyword (:finish_reason choice)))}]}
+      ;; Preserve usage on chunks that carry it (final chunk when
+      ;; stream_options.include_usage is set).
+      (:usage chunk) (assoc :usage (transform-usage (:usage chunk))))))
 
 (defn make-streaming-request-impl
   "OpenRouter-specific make-streaming-request implementation"

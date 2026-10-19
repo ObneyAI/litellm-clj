@@ -71,23 +71,32 @@
 
 (defn completion
   "Completion function using registered configurations.
-  
+
   First argument is a keyword referring to a registered config name.
-  
+
+  A :model in the request map overrides the registered config's model
+  for this call — callers no longer need to register a synthetic
+  per-model provider just to vary the model.
+
   Examples:
     ;; Using registered config
     (completion :fast {:messages [{:role :user :content \"Hello\"}]})
-    
+
     ;; With additional options
-    (completion :smart 
+    (completion :smart
                 {:messages [{:role :user :content \"Hello\"}]
-                 :max-tokens 100})"
+                 :max-tokens 100})
+
+    ;; Per-request model override
+    (completion :openrouter
+                {:messages [{:role :user :content \"Hello\"}]
+                 :model \"qwen/qwen3.7-max\"})"
   [config-name request-map]
   (let [resolved (config/resolve-config config-name request-map)
         provider (:provider resolved)
-        model (:model resolved)
+        model (or (:model request-map) (:model resolved))
         provider-config (:config resolved)
-        full-request (merge request-map
+        full-request (merge (dissoc request-map :model)
                            (when provider-config
                              (select-keys provider-config [:api-key :api-base])))]
     (core/completion provider model full-request provider-config)))
@@ -174,10 +183,15 @@
               :config {:api-base api-base}}))
 
 (defn setup-openrouter!
-  "Quick setup for OpenRouter with optional custom config name"
+  "Quick setup for OpenRouter with optional custom config name.
+
+   The default model is deliberately a cheap one (mirroring
+   setup-openai!) — it is the silent fallback for every call that
+   doesn't specify a model, so an expensive default here turns into
+   surprise billing."
   [& {:keys [config-name api-key model]
       :or {config-name :openrouter
-           model "openai/gpt-4"}}]
+           model "openai/gpt-4o-mini"}}]
   (let [key (or api-key (env "OPENROUTER_API_KEY"))]
     (when-not key
       (throw (ex-info "OpenRouter API key not provided and OPENROUTER_API_KEY env var not set" {})))

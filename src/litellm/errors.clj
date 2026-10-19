@@ -539,10 +539,16 @@
                      provider-name
                      (or (.getMessage e) "HTTP error")
                      :cause e))))))
+    (catch clojure.lang.ExceptionInfo e
+      (if (litellm-error? e)
+        (throw e)
+        (throw (provider-error
+                provider-name
+                (or (.getMessage e) "Unexpected error")
+                :cause e))))
     (catch Exception e
       (throw (provider-error
               provider-name
               (or (.getMessage e) "Unexpected error")
               :cause e)))))
-
 

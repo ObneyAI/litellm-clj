@@ -1,0 +1,23 @@
+-- allium: 3
+external entity ProviderCaller {}
+contract ProviderContractTransport {
+    complete: (request: Any, configuration: Any) -> Any
+    @invariant ControlsReachWire
+        -- Accepted strict-function and structured-response-format controls retain
+        -- their literal meaning in the serialized OpenRouter request, including
+        -- explicit false. Conflicting raw overrides fail rather than silently
+        -- replacing a normalized response contract. Unsupported behavior is explicit.
+    @invariant ReturnedObservationsRemainAvailable
+        -- Provider-returned reasoning text and typed reasoning blocks retain their
+        -- exact data, order and presence, including opaque blocks. Reported token
+        -- detail and cost remain available alongside aggregate usage and finish reason.
+        -- No absent observation, reasoning token count or cost is synthesized.
+        -- Explicit provider refusal retains its value and presence independently
+        -- of content, tool arguments and finish reason. Absence is not a refusal.
+        -- Existing content and tool arguments are unchanged.
+}
+surface ProviderTransportBoundary {
+    facing caller: ProviderCaller
+    contracts:
+        fulfils ProviderContractTransport
+}

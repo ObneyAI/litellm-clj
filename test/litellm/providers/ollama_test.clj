@@ -135,12 +135,12 @@
       (is (contains? result :messages))
       (is (= "auto" (:tool_choice result)))))
 
-  (testing "Request without tools uses generate API by default"
+  (testing "Message-shaped request without tools uses chat API"
     (let [request {:model "llama3"
                    :messages [{:role :user :content "Hello"}]}
           result (ollama/transform-request-impl :ollama request {})]
-      (is (contains? result :prompt))
-      (is (not (contains? result :messages)))))
+      (is (contains? result :messages))
+      (is (not (contains? result :prompt)))))
 
   (testing "Request with ollama_chat prefix uses chat API"
     (let [request {:model "ollama_chat/llama3"

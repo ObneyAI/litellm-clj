@@ -1,5 +1,6 @@
 (ns litellm.router-test
   (:require [clojure.test :refer [deftest testing is use-fixtures]]
+            [litellm.core :as core]
             [litellm.router :as router]))
 
 ;; Test fixture to clear registry before each test
@@ -43,6 +44,41 @@
     (is (= 2 (count (router/list-configs))))
     (router/clear-router!)
     (is (= 0 (count (router/list-configs))))))
+
+;; ============================================================================
+;; Per-request model override
+;; ============================================================================
+
+(deftest test-completion-uses-registered-model-by-default
+  (testing "Without a request :model, the registered config's model is used"
+    (router/register! :test-config {:provider :openai
+                                    :model "gpt-4o-mini"
+                                    :config {:api-key "test-key"}})
+    (let [called (atom nil)]
+      (with-redefs [core/completion (fn [provider model request config]
+                                      (reset! called {:provider provider
+                                                      :model model
+                                                      :request request})
+                                      {:ok true})]
+        (router/completion :test-config {:messages [{:role :user :content "hi"}]})
+        (is (= "gpt-4o-mini" (:model @called)))))))
+
+(deftest test-completion-request-model-overrides-registered-model
+  (testing "A :model in the request map wins over the registered config's model"
+    (router/register! :test-config {:provider :openai
+                                    :model "gpt-4o-mini"
+                                    :config {:api-key "test-key"}})
+    (let [called (atom nil)]
+      (with-redefs [core/completion (fn [provider model request config]
+                                      (reset! called {:provider provider
+                                                      :model model
+                                                      :request request})
+                                      {:ok true})]
+        (router/completion :test-config {:messages [{:role :user :content "hi"}]
+                                         :model "qwen/qwen3.7-max"})
+        (is (= "qwen/qwen3.7-max" (:model @called)))
+        (is (not (contains? (:request @called) :model))
+            "the override is consumed, not forwarded as a request param")))))
 
 ;; ============================================================================
 ;; Router Configuration Tests

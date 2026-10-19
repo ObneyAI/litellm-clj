@@ -174,17 +174,29 @@
     (str model)))
 
 (defn transform-request-impl
-  "Ollama-specific transform-request implementation"
+  "Ollama-specific transform-request implementation. Anything with
+   `:messages` goes through `/api/chat` (the message-shaped endpoint);
+   only legacy single-prompt requests fall through to `/api/generate`.
+   Per-request sampling options (`:max-tokens`, `:temperature`,
+   `:top-p`) are *passed through when set* — we do not impose defaults,
+   matching the openai/gemini behavior. Imposing them silently truncates
+   models that consume tokens on internal reasoning before producing
+   visible output (e.g. gemma4)."
   [provider-name request config]
   (let [original-model (:model request)
-        ;; Use chat API if explicitly requested OR if tools are present (tools require chat API)
         has-tools (or (:tools request) (:tool-choice request))
-        is-chat (or (str/starts-with? original-model "ollama_chat/") has-tools)
+        is-chat (or (str/starts-with? original-model "ollama_chat/")
+                    has-tools
+                    (seq (:messages request)))
         model (extract-model-name original-model)
         actual-model (if (str/starts-with? original-model "ollama_chat/")
                        (subs original-model (count "ollama_chat/"))
                        model)
-        messages (:messages request)]
+        messages (:messages request)
+        options (cond-> {}
+                  (:max-tokens request)  (assoc :num_predict (:max-tokens request))
+                  (:temperature request) (assoc :temperature (:temperature request))
+                  (:top-p request)       (assoc :top_p (:top-p request)))]
 
     (if is-chat
       ;; Chat API format (supports tools)
@@ -193,43 +205,39 @@
                :stream (:stream request false)}
         (:format request) (assoc :format (:format request))
         (:tools request) (assoc :tools (transform-tools (:tools request)))
-        (:tool-choice request) (assoc :tool_choice (transform-tool-choice (:tool-choice request))))
+        (:tool-choice request) (assoc :tool_choice (transform-tool-choice (:tool-choice request)))
+        (seq options) (assoc :options options))
 
-      ;; Generate API format (no tool support)
+      ;; Generate API format (legacy, no tool support)
       (cond-> {:model actual-model
                :prompt (transform-messages-for-generate messages)
-               :stream (:stream request false)
-               :options {:num_predict (or (:max-tokens request) 128)
-                        :temperature (or (:temperature request) 0.7)
-                        :top_p (or (:top-p request) 1.0)}}
-        (:format request) (assoc :format (:format request))))))
+               :stream (:stream request false)}
+        (:format request) (assoc :format (:format request))
+        (seq options) (assoc :options options)))))
 
 (defn make-request-impl
-  "Ollama-specific make-request implementation"
+  "Ollama-specific make-request implementation. Matches the make-request
+   contract (see [[litellm.providers.core/make-request]]) by returning a
+   deref-able future, like the other providers do via hato's `:async? true`."
   [provider-name transformed-request thread-pool telemetry config]
-  (let [model (:model transformed-request)
-        is-chat (contains? transformed-request :messages)
+  (let [is-chat (contains? transformed-request :messages)
         url (str (:api-base config "http://localhost:11434") (if is-chat "/api/chat" "/api/generate"))]
-    
     (errors/wrap-http-errors
       "ollama"
-      #(let [start-time (System/currentTimeMillis)
-             response (http/post url
-                                 (conj {:headers {"Content-Type" "application/json"
-                                                  "User-Agent" "litellm-clj/1.0.0"}
-                                        :body (json/encode transformed-request)
-                                        :timeout (:timeout config 30000)
-                                        :as :json}
-                                       (when thread-pool
-                                         {:executor thread-pool})))
-             duration (- (System/currentTimeMillis) start-time)]
-         
-         ;; Handle errors if response has error status
-         (when (>= (:status response) 400)
-           (handle-error-response :ollama response))
-         
-         ;; Add request type to response for later processing
-         (assoc response :ollama-request-type (if is-chat :chat :generate))))))
+      #(let [response-future (http/post url
+                                        (conj {:headers {"Content-Type" "application/json"
+                                                         "User-Agent" "litellm-clj/1.0.0"}
+                                               :body (json/encode transformed-request)
+                                               :timeout (:timeout config 30000)
+                                               :async? true
+                                               :as :json}
+                                              (when thread-pool
+                                                {:executor thread-pool})))]
+         (future
+           (let [response @response-future]
+             (when (>= (:status response) 400)
+               (handle-error-response :ollama response))
+             (assoc response :ollama-request-type (if is-chat :chat :generate))))))))
 
 (defn transform-response-impl
   "Ollama-specific transform-response implementation"
