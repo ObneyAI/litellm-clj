@@ -210,15 +210,19 @@
   [provider-name request config]
   (let [model (:model request)
         reasoning (transform-reasoning request)
-        transformed {:model model
-                    :messages (transform-messages (:messages request))
-                    :max_tokens (:max-tokens request)
-                    :temperature (:temperature request)
-                    :top_p (:top-p request)
-                    :frequency_penalty (:frequency-penalty request)
-                    :presence_penalty (:presence-penalty request)
-                    :stop (:stop request)
-                    :stream (:stream request false)}]
+        ;; An omitted setting must stay omitted: OpenRouter can route by the
+        ;; presence of a parameter even when its JSON value is null. Limit this
+        ;; rule to normalized generation options; schema/message nulls and
+        ;; explicit provider fields in extra-body retain their own semantics.
+        transformed (cond-> {:model model
+                             :messages (transform-messages (:messages request))
+                             :stream (:stream request false)}
+                      (some? (:max-tokens request)) (assoc :max_tokens (:max-tokens request))
+                      (some? (:temperature request)) (assoc :temperature (:temperature request))
+                      (some? (:top-p request)) (assoc :top_p (:top-p request))
+                      (some? (:frequency-penalty request)) (assoc :frequency_penalty (:frequency-penalty request))
+                      (some? (:presence-penalty request)) (assoc :presence_penalty (:presence-penalty request))
+                      (some? (:stop request)) (assoc :stop (:stop request)))]
     
     ;; Add function calling if present
     (merge-openrouter-extra-body

@@ -479,6 +479,11 @@
   [provider-name f]
   (try
     (f)
+    (catch java.net.http.HttpTimeoutException e
+      (throw (timeout-error
+               provider-name
+               (or (.getMessage e) "Request timeout")
+               :cause e)))
     (catch java.net.SocketTimeoutException e
       (throw (timeout-error
                provider-name
@@ -505,11 +510,17 @@
                (str "SSL error: " (.getMessage e))
                :cause e)))
     (catch java.util.concurrent.ExecutionException e
-      ;; Re-throw if already a litellm error
-      (if (litellm-error? e)
-        (throw e)
+      (let [cause (ex-cause e)]
+        (cond
+          ;; Futures wrap the original error, not its typed meaning.
+          (litellm-error? cause) (throw cause)
+          (instance? java.net.http.HttpTimeoutException cause)
+          (throw (timeout-error provider-name
+                                (or (.getMessage ^Throwable cause) "Request timeout")
+                                :cause cause))
+          :else
         ;; Hato throws ExceptionInfo with HTTP response in ex-data
-        (let [data (-> e ex-cause ex-data)]
+        (let [data (ex-data cause)]
           (if-let [status (:status data)]
             ;; HTTP error from hato - extract response details
             (let [headers (:headers data)
@@ -538,7 +549,7 @@
             (throw (provider-error
                      provider-name
                      (or (.getMessage e) "HTTP error")
-                     :cause e))))))
+                     :cause e)))))))
     (catch clojure.lang.ExceptionInfo e
       (if (litellm-error? e)
         (throw e)
