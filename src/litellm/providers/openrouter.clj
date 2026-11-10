@@ -210,15 +210,19 @@
   [provider-name request config]
   (let [model (:model request)
         reasoning (transform-reasoning request)
-        transformed {:model model
-                    :messages (transform-messages (:messages request))
-                    :max_tokens (:max-tokens request)
-                    :temperature (:temperature request)
-                    :top_p (:top-p request)
-                    :frequency_penalty (:frequency-penalty request)
-                    :presence_penalty (:presence-penalty request)
-                    :stop (:stop request)
-                    :stream (:stream request false)}]
+        ;; An omitted setting must stay omitted: OpenRouter can route by the
+        ;; presence of a parameter even when its JSON value is null. Limit this
+        ;; rule to normalized generation options; schema/message nulls and
+        ;; explicit provider fields in extra-body retain their own semantics.
+        transformed (cond-> {:model model
+                             :messages (transform-messages (:messages request))
+                             :stream (:stream request false)}
+                      (some? (:max-tokens request)) (assoc :max_tokens (:max-tokens request))
+                      (some? (:temperature request)) (assoc :temperature (:temperature request))
+                      (some? (:top-p request)) (assoc :top_p (:top-p request))
+                      (some? (:frequency-penalty request)) (assoc :frequency_penalty (:frequency-penalty request))
+                      (some? (:presence-penalty request)) (assoc :presence_penalty (:presence-penalty request))
+                      (some? (:stop request)) (assoc :stop (:stop request)))]
     
     ;; Add function calling if present
     (merge-openrouter-extra-body
@@ -399,15 +403,34 @@
               (loop []
                 (when-let [line (streaming/read-sse-line! reader)]
                   (when-let [parsed (streaming/parse-sse-line line json/decode)]
-                    (let [transformed (transform-streaming-chunk-impl :openrouter parsed)]
+                    (let [provider-error (:error parsed)
+                          status (:code provider-error)
+                          status (when (and (integer? status) (<= 100 status 599)) status)
+                          transformed (if provider-error
+                                        (streaming/stream-error "openrouter" "Provider stream failed"
+                                          :status status
+                                          :error-type (if (and status (<= 500 status 599))
+                                                        :litellm/server-error :litellm/streaming-error))
+                                        (transform-streaming-chunk-impl :openrouter parsed))]
                       (>! output-ch transformed)))
                   (recur)))
               (.close ^java.io.BufferedReader reader)
               (streaming/close-stream! output-ch))))
         
         (catch Exception e
-          (log/error "Error in streaming request" {:error (.getMessage e)})
-          (>! output-ch (streaming/stream-error "openrouter" (.getMessage e)))
+          (let [data (ex-data e)
+                status (or (:http-status data) (:status data))
+                status (when (and (integer? status) (<= 100 status 599)) status)
+                category (cond
+                           (instance? java.net.http.HttpTimeoutException e) :litellm/timeout
+                           (instance? java.net.ConnectException e) :litellm/connection-error
+                           (and status (<= 500 status 599)) :litellm/server-error
+                           (= status 408) :litellm/timeout
+                           :else :litellm/streaming-error)
+                message (str "Streaming request failed" (when status (str " (HTTP " status ")")))]
+            (log/error message)
+            (>! output-ch (streaming/stream-error "openrouter" message
+                                                  :status status :error-type category)))
           (streaming/close-stream! output-ch))))
     
     output-ch))

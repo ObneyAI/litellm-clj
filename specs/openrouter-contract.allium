@@ -7,6 +7,13 @@ contract ProviderContractTransport {
         -- their literal meaning in the serialized OpenRouter request, including
         -- explicit false. Conflicting raw overrides fail rather than silently
         -- replacing a normalized response contract. Unsupported behavior is explicit.
+    @invariant HttpTimeoutMeaningSurvivesAsyncBoundary
+        -- A Java HTTP request timeout remains a typed provider timeout whether
+        -- raised directly or through an asynchronous execution wrapper. It does
+        -- not become a generic provider or connection error merely because the
+        -- wrapper changed. Existing typed provider errors and HTTP response
+        -- status classification retain their original meaning. A failed request
+        -- has no invented HTTP response status, resolved model or usage.
     @invariant ReturnedObservationsRemainAvailable
         -- Provider-returned reasoning text and typed reasoning blocks retain their
         -- exact data, order and presence, including opaque blocks. Reported token
